@@ -94,6 +94,16 @@ def main() -> int:
     brief["topic"] = "The Last Lighthouse"
     cp("research", "completed", {"research_brief": brief})
 
+    # proposal gates: awaiting_human -> approved
+    cp("proposal", "in_progress", {})
+    prop = sample_artifact("proposal_packet")
+    save_artifact("proposal", prop)
+    cp("proposal", "awaiting_human", {"proposal_packet": prop},
+       review={"round": 1, "decision": "pass", "critical": 0, "suggestions": 0,
+               "nitpicks": 0, "summary": "Concept and pipeline approved."})
+    time.sleep(wait)
+    cp("proposal", "completed", {"proposal_packet": prop}, human_approved=True)
+
     # script gates: awaiting_human -> approved
     cp("script", "in_progress", {})
     save_artifact("script", art["script"])
