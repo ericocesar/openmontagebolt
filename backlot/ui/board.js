@@ -2,11 +2,19 @@
 
 import {
   STAGE_ICONS, el, fmtAgo, fmtClock, fmtDuration, fmtMoney,
-  getJSON, mediaURL, subscribe, thumbURL, waveBars,
-} from "/ui/lib.js";
+  getJSON, mediaURL, subscribe, thumbURL, waveBars, backlotURL,
+} from "./lib.js";
 
-const rawProjectPath = location.pathname.split("/p/")[1] || "";
-const projectId = decodeURIComponent(rawProjectPath);
+const basePath = document.querySelector('meta[name="backlot-base-path"]')?.content ?? "";
+const embedded = new URLSearchParams(location.search).get("embedded") === "1";
+const localPath = basePath && location.pathname.startsWith(basePath)
+  ? location.pathname.slice(basePath.length) : location.pathname;
+const projectMatch = /^\/p\/([^/]+)\/?$/.exec(localPath);
+let projectId = "";
+try {
+  const decoded = projectMatch ? decodeURIComponent(projectMatch[1]) : "";
+  if (/^[A-Za-z0-9_-]+$/.test(decoded) && decoded !== "." && decoded !== "..") projectId = decoded;
+} catch { /* invalid project path */ }
 const encodedProjectId = encodeURIComponent(projectId);
 const app = document.getElementById("app");
 const modal = document.getElementById("modal");
@@ -92,7 +100,7 @@ function renderSlate(s) {
   return el("header", { class: "slate" },
     el("div", { class: "clapper" }),
     el("div", {},
-      el("a", { class: "wordmark", href: "/", style: "text-decoration:none" }, "Backlot"),
+      el(embedded ? "span" : "a", { class: "wordmark", href: embedded ? null : backlotURL("/"), style: "text-decoration:none" }, "Backlot"),
       el("h1", {}, s.title),
     ),
     ...chips,
@@ -108,7 +116,9 @@ function renderSlate(s) {
 // ---------------------------------------------------------------------------
 
 function stageSub(st) {
-  if (st.status === "awaiting_human") return "awaiting your approval\nreply in chat to continue";
+  if (st.status === "awaiting_human") return embedded
+    ? "awaiting your approval\nuse the controls above this panel to continue"
+    : "awaiting your approval\nreply in chat to continue";
   if (st.status === "in_progress" && st.stalled) {
     return `stalled? no activity for ${st.stalled_minutes}m\nask the agent for status`;
   }
@@ -1126,6 +1136,7 @@ function normalize(s) {
 }
 
 async function refresh() {
+  if (!projectId) throw new Error("Invalid project path");
   state = normalize(await getJSON(`/api/project/${encodeURIComponent(projectId)}/state`));
   render();
 }

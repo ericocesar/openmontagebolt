@@ -11,6 +11,8 @@ python -m backlot open                # library view (all projects)
 python -m backlot serve --port 4750   # run the server in the foreground
 ```
 
+For a board embedded behind a same-origin reverse proxy, run `python -m backlot serve --port 4751 --base-path /api/v1/openmontage/backlot`. The validated base path is used for HTML assets and board API, event, thumbnail, and media URLs. The default remains empty for standalone use. Add `?embedded=1` to a project board URL to hide the library link and direct approval gates to the host page's controls. Backlot continues serving internal routes such as `/p/{project_id}`, `/api`, `/media`, and `/thumb`; the reverse proxy removes the external base path before forwarding.
+
 ## How it stays live
 
 No agent involvement. A `watchfiles` watcher on `projects/` publishes change

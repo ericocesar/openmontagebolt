@@ -8,14 +8,16 @@ refetch state. The server never writes to project directories.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
+import os
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backlot.state import PROJECTS_DIR, REPO_ROOT, list_projects, load_board_state, summarize_project
@@ -30,14 +32,37 @@ _IGNORE_PARTS = {"node_modules", ".git", "__pycache__", ".cache"}
 SSE_HEARTBEAT_SECONDS = 15
 
 
-def _ui_html(name: str, assets: tuple[str, ...]) -> HTMLResponse:
+def normalize_base_path(value: str | None) -> str:
+    value = value or ""
+    if value == "":
+        return ""
+    if not value.startswith("/") or value.startswith("//") or value.endswith("/"):
+        raise ValueError("Backlot base path must be empty or a normalized absolute URL path")
+    segments = value[1:].split("/")
+    if not segments or any(
+        not segment or segment in {".", ".."}
+        or not all(c.isascii() and (c.isalnum() or c in "-_") for c in segment)
+        for segment in segments
+    ):
+        raise ValueError("Backlot base path contains an invalid segment")
+    return "/" + "/".join(segments)
+
+
+def _ui_html(name: str, assets: tuple[str, ...], base_path: str = "") -> HTMLResponse:
     html = (UI_DIR / name).read_text(encoding="utf-8")
     for asset in assets:
         path = UI_DIR / asset
         if path.is_file():
             version = str(int(path.stat().st_mtime))
-            html = html.replace(f"/ui/{asset}", f"/ui/{asset}?v={version}")
+            html = html.replace(
+                f"{{{{BACKLOT_BASE_PATH}}}}/ui/{asset}",
+                f"{base_path}/ui/{asset}?v={version}",
+            )
+    html = html.replace("{{BACKLOT_BASE_PATH}}", html_escape(base_path))
     return HTMLResponse(html)
+
+
+html_escape = html.escape
 
 
 class ChangeHub:
@@ -162,13 +187,19 @@ async def _lifespan(app: FastAPI):
             await task
 
 
-def create_app() -> FastAPI:
+def create_app(base_path: str | None = None) -> FastAPI:
+    embedded_base_path = normalize_base_path(
+        base_path if base_path is not None else os.environ.get("BACKLOT_BASE_PATH", "")
+    )
     app = FastAPI(title="Backlot", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
     # ---- API ----------------------------------------------------------
 
     @app.get("/api/health")
-    async def health() -> dict:
+    async def health(request: Request) -> dict:
+        managed_id = os.environ.get("BACKLOT_INSTANCE_ID")
+        if managed_id and request.headers.get("x-backlot-instance-id") == managed_id:
+            return {"ok": True, "app": "backlot", "managed_instance_id": managed_id}
         return {"ok": True, "app": "backlot"}
 
     @app.get("/api/projects")
@@ -241,8 +272,8 @@ def create_app() -> FastAPI:
 
     # ---- Thumbnails (downscaled, cached on disk) ------------------------
 
-    @app.get("/thumb/{project_id}/{file_path:path}")
-    async def thumb(project_id: str, file_path: str, w: int = 640) -> FileResponse:
+    @app.api_route("/thumb/{project_id}/{file_path:path}", methods=["GET", "HEAD"])
+    async def thumb(project_id: str, file_path: str, w: int = 640) -> Response:
         project_dir = _safe_project_dir(project_id)
         target = (project_dir / file_path).resolve()
         try:
@@ -263,8 +294,8 @@ def create_app() -> FastAPI:
 
     # ---- Media (range requests handled by FileResponse) ---------------
 
-    @app.get("/media/{project_id}/{file_path:path}")
-    async def media(project_id: str, file_path: str) -> FileResponse:
+    @app.api_route("/media/{project_id}/{file_path:path}", methods=["GET", "HEAD"])
+    async def media(project_id: str, file_path: str) -> Response:
         project_dir = _safe_project_dir(project_id)
         target = (project_dir / file_path).resolve()
         try:
@@ -279,15 +310,19 @@ def create_app() -> FastAPI:
 
     @app.get("/p/{project_id}")
     async def board_page(project_id: str) -> HTMLResponse:
-        return _ui_html("board.html", ("board.css", "board.js"))
+        _safe_project_dir(project_id)
+        return _ui_html("board.html", ("board.css", "board.js"), embedded_base_path)
 
     @app.get("/p/{project_path:path}")
     async def board_page_path(project_path: str) -> HTMLResponse:
-        return _ui_html("board.html", ("board.css", "board.js"))
+        if not project_path or "/" in project_path or "\\" in project_path:
+            raise HTTPException(status_code=400, detail="invalid project id")
+        _safe_project_dir(project_path)
+        return _ui_html("board.html", ("board.css", "board.js"), embedded_base_path)
 
     @app.get("/")
     async def library_page() -> HTMLResponse:
-        return _ui_html("index.html", ("board.css", "library.js"))
+        return _ui_html("index.html", ("board.css", "library.js"), embedded_base_path)
 
     if UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=UI_DIR), name="ui")

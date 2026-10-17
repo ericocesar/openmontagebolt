@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -79,9 +80,25 @@ def cmd_open(project_id: str | None) -> int:
     return 0
 
 
-def cmd_serve(port: int) -> int:
+def _normalize_base_path(value: str) -> str:
+    if value == "":
+        return ""
+    if not value.startswith("/") or value.startswith("//") or value.endswith("/"):
+        raise ValueError("--base-path must be empty or a normalized absolute URL path")
+    segments = value[1:].split("/")
+    if any(not re.fullmatch(r"[A-Za-z0-9_-]+", segment) for segment in segments):
+        raise ValueError("--base-path contains an invalid path segment")
+    return "/" + "/".join(segments)
+
+
+def cmd_serve(port: int, base_path: str = "") -> int:
     import uvicorn
 
+    try:
+        os.environ["BACKLOT_BASE_PATH"] = _normalize_base_path(base_path)
+    except ValueError as exc:
+        print(f"backlot: {exc}", file=sys.stderr)
+        return 2
     uvicorn.run("backlot.server:app", host="127.0.0.1", port=port, log_level="warning")
     return 0
 
@@ -95,12 +112,13 @@ def main(argv: list[str] | None = None) -> int:
 
     p_serve = sub.add_parser("serve", help="run the Backlot server in the foreground")
     p_serve.add_argument("--port", type=int, default=_port())
+    p_serve.add_argument("--base-path", default="", help="external URL prefix inserted into Backlot assets")
 
     args = parser.parse_args(argv)
     if args.command == "open":
         return cmd_open(args.project_id)
     if args.command == "serve":
-        return cmd_serve(args.port)
+        return cmd_serve(args.port, args.base_path)
     parser.print_help()
     return 2
 

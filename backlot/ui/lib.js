@@ -1,7 +1,12 @@
 // Shared helpers for the Backlot UI.
 
+export function backlotURL(path) {
+  const prefix = document.querySelector('meta[name="backlot-base-path"]')?.content ?? "";
+  return `${prefix}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 export async function getJSON(url) {
-  const res = await fetch(url);
+  const res = await fetch(backlotURL(url));
   if (!res.ok) throw new Error(`${res.status} ${url}`);
   return res.json();
 }
@@ -54,18 +59,18 @@ export function fmtClock(iso) {
 }
 
 export function mediaURL(projectId, relPath) {
-  return `/media/${encodeURIComponent(projectId)}/${relPath.split("/").map(encodeURIComponent).join("/")}`;
+  return backlotURL(`/media/${encodeURIComponent(projectId)}/${relPath.split("/").map(encodeURIComponent).join("/")}`);
 }
 
 // Downscaled cached JPEG for images (full media only in players/lightbox).
 export function thumbURL(projectId, relPath, w = 640) {
-  return `/thumb/${encodeURIComponent(projectId)}/${relPath.split("/").map(encodeURIComponent).join("/")}?w=${w}`;
+  return backlotURL(`/thumb/${encodeURIComponent(projectId)}/${relPath.split("/").map(encodeURIComponent).join("/")}?w=${w}`);
 }
 
 // Subscribe to a server-sent change feed; call onChange (debounced) per burst.
 export function subscribe(url, onChange) {
   let timer = null;
-  const source = new EventSource(url);
+  const source = new EventSource(backlotURL(url));
   source.onmessage = (msg) => {
     try {
       const data = JSON.parse(msg.data);
