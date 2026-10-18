@@ -14,6 +14,7 @@ import os
 import platform
 import subprocess
 import shutil
+import threading as _threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -138,7 +139,49 @@ class ToolResult:
     model: Optional[str] = None
 
 
-import threading as _threading
+_NARRATION_POLICY_ENV = "MPT_OPENMONTAGE_NARRATION_POLICY"
+
+
+def _enforce_host_narration_policy(tool: Any, inputs: Any) -> tuple[Any, ToolResult | None]:
+    """Apply an integration-owned TTS choice before invoking a provider tool."""
+    if getattr(tool, "capability", None) != "tts":
+        return inputs, None
+    raw_policy = os.environ.get(_NARRATION_POLICY_ENV)
+    if raw_policy is None:
+        return inputs, None
+    try:
+        policy = json.loads(raw_policy)
+    except (TypeError, json.JSONDecodeError):
+        return inputs, ToolResult(success=False, error="The host narration policy is invalid; refusing TTS generation.")
+    if not isinstance(policy, dict) or policy.get("mode") not in ("generate", "upload", "none"):
+        return inputs, ToolResult(success=False, error="The host narration policy is invalid; refusing TTS generation.")
+    if policy["mode"] != "generate":
+        return inputs, ToolResult(success=False, error="Generated narration is disabled by the host request.")
+    if not isinstance(inputs, dict):
+        return inputs, ToolResult(success=False, error="TTS inputs must be an object under the host narration policy.")
+
+    adapted = dict(inputs)
+    provider = policy.get("provider")
+    if provider is not None and not isinstance(provider, str):
+        return inputs, ToolResult(success=False, error="The selected narration provider is invalid; refusing TTS generation.")
+    if provider:
+        if getattr(tool, "name", "") == "tts_selector":
+            adapted["preferred_provider"] = provider
+            adapted["allowed_providers"] = [provider]
+        elif getattr(tool, "provider", None) != provider:
+            return inputs, ToolResult(
+                success=False,
+                error=f"This narration call is blocked; the host request selected provider {provider!r}.",
+            )
+
+    for field_name in ("voice_id", "voice_mode"):
+        value = policy.get(field_name)
+        if value is not None and not isinstance(value, str):
+            return inputs, ToolResult(success=False, error=f"The selected narration {field_name} is invalid; refusing TTS generation.")
+        if isinstance(value, str) and value.strip():
+            adapted[field_name] = value
+    return adapted, None
+
 
 # Shared nesting counter for instrumented execute() calls (thread-local so
 # parallel tool threads don't see each other's depth).
@@ -163,11 +206,14 @@ def _instrument_execute(fn: Callable) -> Callable:
 
     @functools.wraps(fn)
     def wrapper(self, inputs: Any, *args: Any, **kwargs: Any):
-        # Event layer is fully optional: if it can't import, run untouched.
+        guarded_inputs, blocked_result = _enforce_host_narration_policy(self, inputs)
+        # Event logging is optional; host narration policy enforcement is not.
         try:
             from lib.events import emit_event, infer_project_dir
         except Exception:
-            return fn(self, inputs, *args, **kwargs)
+            if blocked_result is not None:
+                return blocked_result
+            return fn(self, guarded_inputs, *args, **kwargs)
 
         tool_name = getattr(self, "name", "") or self.__class__.__name__
         scene_id = inputs.get("scene_id") if isinstance(inputs, dict) else None
@@ -192,7 +238,7 @@ def _instrument_execute(fn: Callable) -> Callable:
 
         started = time.monotonic()
         try:
-            result = fn(self, inputs, *args, **kwargs)
+            result = blocked_result if blocked_result is not None else fn(self, guarded_inputs, *args, **kwargs)
         except Exception as exc:
             if project_dir is not None:
                 emit_event(project_dir, {
